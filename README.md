@@ -1,77 +1,57 @@
-# Network Traffic Analyzer
+## 🛡️ Sentinel Pro: Phoenix Edition
+Sentinel Pro is a modern, high-performance Network Analysis and Penetration Testing Suite designed for security professionals and network administrators. Moving beyond simple packet capturing, the Phoenix Edition introduces a modular "Glassmorphism" interface, real-time analytics, and a hybrid scanning engine built for stability and deep reconnaissance.
 
-## Overview
+## ✨ Key Features
+### 🔍 Advanced Packet Inspector (Wireshark-Style)
+Three-Pane View: Analyze traffic through a real-time list, a detailed protocol tree (IP, TCP, TLS layers), and a raw Hex Dump.
 
-This is a Network Traffic Analyzer that allows users to monitor network packets, scan connected devices, and analyze traffic using both a GUI and a command-line interface (CLI).
+Website & Domain Detection: Identifies the actual websites being visited (e.g., github.com) by extracting the TLS Server Name Indication (SNI) from encrypted handshakes.
 
-## Features
+Device Identification: Automatically maps IP addresses to hardware manufacturers using an integrated MAC Vendor database.
 
-- Capture and analyze network packets
-- Scan connected devices on the local network
-- Export captured data to CSV
-- Apply filters for specific protocols (TCP, UDP, ICMP, etc.)
-- GUI built with PyQt6 for an enhanced user experience
-- CLI mode for quick and lightweight analysis
+## 🌐 Network Mapper & Intelligence
+Hybrid Scanning Engine: Uses a reliable TCP-Connect method to bypass modern firewalls and accurately identify open ports on local and remote targets.
 
-## Requirements
+Banner Grabbing: Automatically extracts service versions and "Welcome Banners" from open ports for deep reconnaissance.
 
-Ensure you have Python 3 installed on your system.
+OS Fingerprinting: Analyzes packet TTL (Time To Live) to intelligently guess the target's Operating System (Windows vs. Linux/Unix).
 
-### Install Dependencies
+## 📊 Professional UI & Analytics
+Cyberpunk Glassmorphism: A stunning Windows 11/12 inspired "Mica" interface with glowing accents, animated sidebars, and high-contrast dark mode.
 
-Run the following command to install the required dependencies:
+Live Throughput Visualization: Real-time throughput graph (Packets/Sec) integrated directly into the dashboard.
 
-```sh
+Modular Landing Page: Access specialized tools like the Packet Sniffer, Port Scanner, and Security Auditor from a central hub.
+
+## 🛠️ Technology Stack
+Backend: Python 3, Scapy (Packet Manipulation).
+
+Frontend: PyQt6 (GUI), Matplotlib (Analytics), Qt-Material (Theming).
+
+System: psutil (Interface detection), Cryptography (TLS/SSL decryption).
+
+## 🚀 Getting Started
+### Prerequisites
+Ensure you have Python 3.10+ installed. This tool requires administrative privileges to access network hardware.
+
+### Installation
+Clone the repository:
+
+### Bash
+
+git clone https://github.com/amrindersingh1820/network-packet-capturing-tool.git
+Install dependencies:
+
+### Bash
+
 pip install -r requirements.txt
-```
+Run with administrative privileges:
 
-## Running the Program
+### Bash
 
-### GUI Mode
+sudo python live_packet_analyzer.py
+## ⚠️ Disclaimer
+This tool is intended for educational and ethical security testing purposes only. Unauthorized use of this tool for network interference or data interception is strictly prohibited.
 
-To launch the graphical user interface:
-
-```sh
-python live_packet_analyzer(GUI).py
-```
-
-### CLI Mode
-
-To run the command-line interface:
-
-```sh
-python live_packet_analyzer(CMLI).py
-```
-
-## Usage Instructions
-
-### GUI Interface
-
-1. Click on `Scan Network` to detect connected devices.
-2. Click `Start Sniffing` to begin capturing network packets.
-3. Click `Stop Sniffing` to halt packet capture.
-4. Use the `Filter` input box to apply protocol filters.
-5. Click `Export to CSV` to save captured data.
-
-### CLI Interface
-
-1. Run the script using `python network_cli.py`.
-2. It will automatically start sniffing packets.
-3. Press `Ctrl + C` to stop packet capture.
-4. Use optional command-line arguments for specific filtering.
-
-## Notes
-
-- This program requires administrator/root privileges to capture network packets.
-- Ensure your firewall/antivirus does not block packet sniffing.
-
-## License
-
-This project is licensed under the MIT License.
-
-## Author
-
-Developed by Amrinder Singh
-
-
-
+## 👤 Author
+### Developed by Amrinder Singh
