@@ -1,225 +1,311 @@
 import sys
-import os
-import logging
-import socket
-import datetime
 import threading
-import csv
-from scapy.layers.l2 import ARP, Ether
-from scapy.layers.inet import IP, TCP, UDP
-from scapy.sendrecv import sniff, srp
-import netifaces
+import datetime
+import psutil
+import socket
+import concurrent.futures
+from scapy.all import sniff, IP, TCP, ARP, Ether, srp, ICMP, sr1, conf, Raw
+from scapy.layers.tls.all import TLS, TLSClientHello
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QTextEdit,
-    QTableWidget, QTableWidgetItem, QFileDialog, QLineEdit, QHBoxLayout
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QTableWidget, QTableWidgetItem, QLabel, QHeaderView,
+    QStackedWidget, QFrame, QLineEdit, QProgressBar, QTextEdit, QSplitter,
+    QTreeWidget, QTreeWidgetItem
 )
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import pyqtSignal, QObject, Qt, QTimer, QThread
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(message)s")
-logger = logging.getLogger(__name__)
+# --- UI THEME: Cyberpunk Glass / Phoenix Edition ---
+PHOENIX_STYLE = """
+    QMainWindow { background-color: #0d1117; }
+    QWidget { color: #c9d1d9; font-family: 'Segoe UI', 'SF Pro Display', sans-serif; }
 
-packet_data = []
-network_devices = {}
-sniffing_active = False
+    QFrame#sidebar { 
+        background-color: #161b22; 
+        border-right: 2px solid #30363d; 
+        min-width: 280px;
+    }
 
+    QPushButton.nav-btn {
+        background-color: transparent; border: none; border-radius: 12px;
+        padding: 18px; text-align: left; font-size: 15px; color: #8b949e; margin: 6px 15px;
+    }
+    QPushButton.nav-btn:hover { background-color: #21262d; color: #58a6ff; }
+    QPushButton.nav-btn:checked { 
+        background-color: #1f6feb; color: #ffffff; font-weight: 700; 
+        border-left: 6px solid #58a6ff;
+    }
 
-def get_active_network_interface():
-    """Find the active network interface used for the internet connection."""
-    gateways = netifaces.gateways()
-    default_gateway = gateways.get("default", {}).get(netifaces.AF_INET)
-    if default_gateway:
-        return default_gateway[1]
-    logger.error("❌ No active internet-connected interface found!")
-    return None
+    QTableWidget { 
+        background-color: #0d1117; border: none; gridline-color: #30363d; 
+        border-radius: 12px; selection-background-color: #1f6feb;
+    }
+    QHeaderView::section {
+        background-color: #161b22; color: #8b949e; padding: 12px; border: none; font-weight: bold;
+    }
 
+    QLineEdit { 
+        background-color: #0d1117; border: 1px solid #3fb950; 
+        border-radius: 8px; padding: 12px; color: #3fb950; font-family: 'Consolas';
+    }
 
-def get_local_network():
-    """Retrieve the local network's IP and CIDR."""
-    interface = get_active_network_interface()
-    if not interface:
-        return None
-    addrs = netifaces.ifaddresses(interface)
-    if netifaces.AF_INET in addrs:
-        ip_info = addrs[netifaces.AF_INET][0]
-        ip_address = ip_info["addr"]
-        netmask = ip_info["netmask"]
-        cidr = sum(bin(int(x)).count("1") for x in netmask.split("."))
-        return f"{ip_address}/{cidr}"
-    return None
+    QPushButton#actionBtn { 
+        background-color: #238636; border-radius: 8px; padding: 12px 25px; 
+        font-weight: bold; color: white; border: 1px solid #2ea043;
+    }
+    QPushButton#actionBtn:hover { background-color: #2ea043; box-shadow: 0 0 15px #2ea043; }
 
+    QTreeWidget, QTextEdit { 
+        background-color: #161b22; border: 1px solid #30363d; border-radius: 10px; 
+        font-family: 'Consolas', monospace; padding: 10px; font-size: 13px;
+    }
 
-def scan_network():
-    """Scan the local network for connected devices."""
-    network_ip = get_local_network()
-    if not network_ip:
-        return []
-    logger.info(f"🔍 Scanning network {network_ip}...")
-    arp_request = ARP(pdst=network_ip)
-    broadcast = Ether(dst="ff:ff:ff:ff:ff:ff")
-    answered, _ = srp(broadcast / arp_request, timeout=2, verbose=False)
-
-    devices = []
-    for _, received in answered:
-        ip = received.psrc
-        mac = received.hwsrc
-        device = get_device_name(mac)
-        devices.append((ip, mac, device))
-        network_devices[mac] = device
-    return devices
+    QProgressBar { border: 1px solid #30363d; border-radius: 5px; text-align: center; height: 10px; background: #0d1117; }
+    QProgressBar::chunk { background-color: #3fb950; border-radius: 5px; }
+"""
 
 
-def get_mac(ip):
-    """Get the MAC address of a given IP."""
-    arp_request = ARP(pdst=ip)
-    broadcast = Ether(dst="ff:ff:ff:ff:ff:ff")
-    answered, _ = srp(broadcast / arp_request, timeout=1, verbose=False)
-    for _, received in answered:
-        return received.hwsrc
-    return None
+class WorkerSignals(QObject):
+    packet_received = pyqtSignal(list, object)
+    scan_result = pyqtSignal(list)
+    scan_finished = pyqtSignal()
 
 
-def get_device_name(mac):
-    """Retrieve the device name from the MAC address."""
-    return network_devices.get(mac, "Unknown Device")
+# --- HYBRID SCANNER ENGINE (Fixes the "Not Working" Issue) ---
+class PhoenixScanner(QThread):
+    def __init__(self, target, signals):
+        super().__init__()
+        self.target = target
+        self.signals = signals
+
+    def run(self):
+        # Top 20 common ports for speed and reliability
+        ports = [21, 22, 23, 25, 53, 80, 110, 135, 139, 443, 445, 1433, 3306, 3389, 5432, 8000, 8080, 8443, 9000, 27017]
+        for port in ports:
+            try:
+                # Standard Connect Scan (Works on localhost and through firewalls)
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(0.5)
+                result = sock.connect_ex((self.target, port))
+                if result == 0:
+                    service = "Unknown"
+                    try:
+                        service = socket.getservbyport(port).upper()
+                    except:
+                        pass
+
+                    # Banner Grabbing
+                    banner = "No banner"
+                    try:
+                        sock.send(b'HEAD / HTTP/1.0\r\n\r\n')
+                        banner = sock.recv(512).decode().split('\r\n')[0][:30]
+                    except:
+                        pass
+
+                    self.signals.scan_result.emit([str(port), service, "OPEN ✅", banner])
+                sock.close()
+            except:
+                pass
+        self.signals.scan_finished.emit()
 
 
-def resolve_hostname(ip):
-    """Resolve an IP address to a hostname."""
-    try:
-        return socket.gethostbyaddr(ip)[0]
-    except socket.herror:
-        return "Unknown"
-
-
-def packet_callback(packet):
-    """Process incoming packets and store relevant information."""
-    if IP in packet:
-        src_ip = packet[IP].src
-        dst_ip = packet[IP].dst
-        protocol = {1: "ICMP", 6: "TCP", 17: "UDP"}.get(packet[IP].proto, f"Unknown({packet[IP].proto})")
-        size = len(packet)
-        dst_port = packet[TCP].dport if TCP in packet else (packet[UDP].dport if UDP in packet else None)
-        hostname = resolve_hostname(dst_ip)
-        mac_address = get_mac(src_ip)
-        device_name = get_device_name(mac_address) if mac_address else "Unknown Device"
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        packet_info = [timestamp, src_ip, dst_ip, hostname, protocol, size, dst_port, device_name]
-        packet_data.append(packet_info)
-
-
-def sniff_packets():
-    """Sniff network packets continuously."""
-    global sniffing_active
-    interface = get_active_network_interface()
-    if not interface:
-        return
-    sniffing_active = True
-    try:
-        sniff(iface=interface, prn=packet_callback, store=False, stop_filter=lambda x: not sniffing_active)
-    except PermissionError:
-        logger.error("Permission denied. Try running with sudo.")
-    except Exception as e:
-        logger.error(f"Error: {e}")
-
-
-class NetworkTrafficAnalyzer(QWidget):
-    """GUI Application for Network Traffic Analysis."""
-
+class SentinelProPhoenix(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.initUI()
+        self.setWindowTitle("Sentinel Pro: Phoenix Edition")
+        self.resize(1600, 950)
+        self.setStyleSheet(PHOENIX_STYLE)
 
-    def initUI(self):
-        """Initialize the user interface."""
-        self.setWindowTitle("Network Traffic Analyzer")
-        self.setGeometry(100, 100, 900, 600)
-        layout = QVBoxLayout()
+        self.signals = WorkerSignals()
+        self.is_sniffing = False
+        self.packet_list = []
+        self.init_ui()
 
-        # Filter bar like Wireshark
-        filter_layout = QHBoxLayout()
-        self.filter_input = QLineEdit()
-        self.filter_input.setPlaceholderText("Enter filter expression (e.g., TCP, UDP, IP)")
-        self.apply_filter_button = QPushButton("Apply Filter")
-        self.apply_filter_button.clicked.connect(self.applyFilter)
-        filter_layout.addWidget(self.filter_input)
-        filter_layout.addWidget(self.apply_filter_button)
-        layout.addLayout(filter_layout)
+    def init_ui(self):
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        layout = QHBoxLayout(main_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        self.scanButton = QPushButton("Scan Network")
-        self.scanButton.clicked.connect(self.scanNetwork)
-        layout.addWidget(self.scanButton)
+        # 1. NAVIGATION SIDEBAR
+        self.sidebar = QFrame()
+        self.sidebar.setObjectName("sidebar")
+        side_layout = QVBoxLayout(self.sidebar)
 
-        self.startButton = QPushButton("Start Sniffing")
-        self.startButton.clicked.connect(self.startSniffing)
-        layout.addWidget(self.startButton)
+        logo = QLabel("🛡️ SENTINEL PHOENIX")
+        logo.setStyleSheet("font-size: 24px; font-weight: 900; padding: 35px; color: #58a6ff;")
+        side_layout.addWidget(logo)
 
-        self.stopButton = QPushButton("Stop Sniffing")
-        self.stopButton.clicked.connect(self.stopSniffing)
-        layout.addWidget(self.stopButton)
+        self.btn_sniffer = self.create_nav_btn("🔍 Packet Inspector", True)
+        self.btn_mapper = self.create_nav_btn("🌐 Network Mapper")
+        self.btn_audit = self.create_nav_btn("⚖️ Security Audit")
 
-        self.exportButton = QPushButton("Export to CSV")
-        self.exportButton.clicked.connect(self.exportToCSV)
-        layout.addWidget(self.exportButton)
+        side_layout.addWidget(self.btn_sniffer)
+        side_layout.addWidget(self.btn_mapper)
+        side_layout.addWidget(self.btn_audit)
+        side_layout.addStretch()
 
-        self.logOutput = QTextEdit()
-        self.logOutput.setReadOnly(True)
-        layout.addWidget(self.logOutput)
+        layout.addWidget(self.sidebar)
 
-        self.packetTable = QTableWidget()
-        self.packetTable.setColumnCount(8)
-        self.packetTable.setHorizontalHeaderLabels(
-            ["Timestamp", "Src IP", "Dst IP", "Hostname", "Protocol", "Size", "Dst Port", "Device"])
-        layout.addWidget(self.packetTable)
+        # 2. WORKSPACE
+        self.stack = QStackedWidget()
+        layout.addWidget(self.stack)
 
-        self.setLayout(layout)
+        self.init_sniffer_tab()
+        self.init_mapper_tab()
 
-    def scanNetwork(self):
-        """Scan the network and display results."""
-        devices = scan_network()
-        self.logOutput.append("📡 Connected Devices:")
-        for ip, mac, device in devices:
-            self.logOutput.append(f"{ip} - {mac} - {device}")
+    def create_nav_btn(self, text, checked=False):
+        btn = QPushButton(text)
+        btn.setCheckable(True)
+        btn.setChecked(checked)
+        btn.setAutoExclusive(True)
+        btn.setProperty("class", "nav-btn")
+        btn.clicked.connect(self.switch_tab)
+        return btn
 
-    def startSniffing(self):
-        """Start capturing packets in a separate thread."""
-        self.logOutput.append("🔍 Capturing packets...")
-        self.sniffThread = threading.Thread(target=sniff_packets, daemon=True)
-        self.sniffThread.start()
-        QTimer.singleShot(2000, self.updatePacketTable)
+    def switch_tab(self):
+        idx = [self.btn_sniffer, self.btn_mapper, self.btn_audit].index(self.sender())
+        self.stack.setCurrentIndex(idx)
 
-    def stopSniffing(self):
-        """Stop the packet sniffing."""
-        global sniffing_active
-        sniffing_active = False
-        self.logOutput.append("🛑 Capture stopped.")
+    # --- TAB 1: ADVANCED PACKET INSPECTOR ---
+    def init_sniffer_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(25, 25, 25, 25)
 
-    def updatePacketTable(self):
-        """Update the GUI table with captured packets."""
-        self.packetTable.setRowCount(len(packet_data))
-        for row, packet in enumerate(packet_data):
-            for col, data in enumerate(packet):
-                self.packetTable.setItem(row, col, QTableWidgetItem(str(data)))
+        ctrl = QHBoxLayout()
+        self.sniff_btn = QPushButton("Start Live Capture")
+        self.sniff_btn.setObjectName("actionBtn")
+        self.sniff_btn.clicked.connect(self.toggle_sniff)
+        ctrl.addWidget(self.sniff_btn)
+        ctrl.addStretch()
+        layout.addLayout(ctrl)
 
-    def applyFilter(self):
-        """Apply a user-defined filter (currently just logs it)."""
-        filter_text = self.filter_input.text().strip()
-        if filter_text:
-            self.logOutput.append(f"Applying filter: {filter_text}")
+        splitter = QSplitter(Qt.Orientation.Vertical)
 
-    def exportToCSV(self):
-        """Export captured packets to a CSV file."""
-        filename, _ = QFileDialog.getSaveFileName(self, "Save File", "packets.csv", "CSV Files (*.csv)")
-        if filename:
-            with open(filename, "w", newline="") as file:
-                writer = csv.writer(file)
-                writer.writerow(["Timestamp", "Src IP", "Dst IP", "Hostname", "Protocol", "Size", "Dst Port", "Device"])
-                writer.writerows(packet_data)
-            self.logOutput.append(f"✅ Data exported to {filename}")
+        self.packet_table = QTableWidget(0, 6)
+        self.packet_table.setHorizontalHeaderLabels(["No.", "Time", "Source", "Destination", "Protocol", "Length"])
+        self.packet_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.packet_table.itemClicked.connect(self.inspect_packet)
+
+        h_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.packet_tree = QTreeWidget()
+        self.packet_tree.setHeaderLabel("Protocol Layers")
+
+        self.hex_view = QTextEdit()
+        self.hex_view.setReadOnly(True)
+        self.hex_view.setPlaceholderText("Select a packet for hex data...")
+
+        h_splitter.addWidget(self.packet_tree)
+        h_splitter.addWidget(self.hex_view)
+
+        splitter.addWidget(self.packet_table)
+        splitter.addWidget(h_splitter)
+        layout.addWidget(splitter)
+
+        self.signals.packet_received.connect(self.add_packet_to_ui)
+        self.stack.addWidget(page)
+
+    # --- TAB 2: NETWORK MAPPER ---
+    def init_mapper_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(40, 40, 40, 40)
+
+        header = QLabel("Network Asset Intelligence")
+        header.setStyleSheet("font-size: 28px; font-weight: 800; color: #ffffff;")
+        layout.addWidget(header)
+
+        form = QHBoxLayout()
+        self.target_input = QLineEdit("127.0.0.1")
+        form.addWidget(QLabel("Target IP:"))
+        form.addWidget(self.target_input)
+
+        self.scan_btn = QPushButton("Run Deep Intelligence Scan")
+        self.scan_btn.setObjectName("actionBtn")
+        self.scan_btn.clicked.connect(self.start_mapping)
+        form.addWidget(self.scan_btn)
+        layout.addLayout(form)
+
+        self.progress_bar = QProgressBar()
+        layout.addWidget(self.progress_bar)
+
+        self.mapper_table = QTableWidget(0, 4)
+        self.mapper_table.setHorizontalHeaderLabels(["Port", "Service", "Status", "Banner / Info"])
+        self.mapper_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.mapper_table)
+
+        self.signals.scan_result.connect(self.add_map_row)
+        self.signals.scan_finished.connect(lambda: self.scan_btn.setEnabled(True))
+        self.stack.addWidget(page)
+
+    # --- CORE LOGIC: SNIFFER ---
+    def toggle_sniff(self):
+        if not self.is_sniffing:
+            self.is_sniffing = True
+            self.sniff_btn.setText("Stop Capture")
+            self.sniff_btn.setStyleSheet("background-color: #da3633;")
+            threading.Thread(target=self.sniff_loop, daemon=True).start()
+        else:
+            self.is_sniffing = False
+            self.sniff_btn.setText("Start Live Capture")
+            self.sniff_btn.setStyleSheet("")
+
+    def sniff_loop(self):
+        # Identify active interface
+        sniff(prn=self.handle_packet, stop_filter=lambda x: not self.is_sniffing, store=0)
+
+    def handle_packet(self, pkt):
+        if IP in pkt:
+            time = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            num = self.packet_table.rowCount() + 1
+            data = [str(num), time, pkt[IP].src, pkt[IP].dst, pkt.sprintf("%IP.proto%"), str(len(pkt))]
+            self.signals.packet_received.emit(data, pkt)
+
+    def add_packet_to_ui(self, data, pkt):
+        row = self.packet_table.rowCount()
+        self.packet_table.insertRow(row)
+        for i, val in enumerate(data): self.packet_table.setItem(row, i, QTableWidgetItem(val))
+        self.packet_list.append(pkt)
+        if row > 25: self.packet_table.scrollToBottom()
+
+    def inspect_packet(self, item):
+        pkt = self.packet_list[item.row()]
+        self.packet_tree.clear()
+
+        # Build protocol layer tree
+        temp_pkt = pkt
+        while temp_pkt:
+            layer = QTreeWidgetItem([temp_pkt.name])
+            for name, val in temp_pkt.fields.items():
+                layer.addChild(QTreeWidgetItem([f"{name}: {val}"]))
+            self.packet_tree.addTopLevelItem(layer)
+            temp_pkt = temp_pkt.payload
+        self.packet_tree.expandAll()
+
+        # Hex Dump view
+        from scapy.utils import hexdump
+        self.hex_view.setText(hexdump(pkt, dump=True))
+
+    # --- CORE LOGIC: MAPPER ---
+    def start_mapping(self):
+        target = self.target_input.text()
+        self.scan_btn.setEnabled(False)
+        self.mapper_table.setRowCount(0)
+        self.progress_bar.setRange(0, 0)  # Infinite pulse
+        self.scan_worker = PhoenixScanner(target, self.signals)
+        self.scan_worker.start()
+        self.signals.scan_finished.connect(lambda: self.progress_bar.setRange(0, 100))
+        self.signals.scan_finished.connect(lambda: self.progress_bar.setValue(100))
+
+    def add_map_row(self, res):
+        row = self.mapper_table.rowCount()
+        self.mapper_table.insertRow(row)
+        for i, val in enumerate(res): self.mapper_table.setItem(row, i, QTableWidgetItem(val))
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = NetworkTrafficAnalyzer()
+    window = SentinelProPhoenix()
     window.show()
     sys.exit(app.exec())
